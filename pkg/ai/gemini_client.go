@@ -3,10 +3,14 @@ package ai
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"os"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -130,8 +134,28 @@ func (c *GeminiClient) GenerateText(prompt string, systemPrompt string, options 
 	fmt.Printf("Gemini: Executing HTTP request...\n")
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
-		fmt.Printf("Gemini: HTTP request failed: %v\n", err)
-		return "", fmt.Errorf("send request: %w", err)
+		if shouldRetryWithDockerGateway(err, c.BaseURL) {
+			fallbackBaseURL := replaceWithDockerGateway(c.BaseURL)
+			if fallbackBaseURL != "" && fallbackBaseURL != c.BaseURL {
+				fmt.Printf("Gemini: Retrying with Docker gateway BaseURL=%s\n", fallbackBaseURL)
+				endpoint = fallbackBaseURL + c.Endpoint
+				endpoint = strings.ReplaceAll(endpoint, "{model}", model)
+				url = fmt.Sprintf("%s?key=%s", endpoint, c.APIKey)
+				safeURL = strings.Replace(url, c.APIKey, "***", 1)
+				fmt.Printf("Gemini: Sending request to: %s\n", safeURL)
+				req, reqErr := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
+				if reqErr != nil {
+					fmt.Printf("Gemini: Failed to create retry request: %v\n", reqErr)
+					return "", fmt.Errorf("create request: %w", reqErr)
+				}
+				req.Header.Set("Content-Type", "application/json")
+				resp, err = c.HTTPClient.Do(req)
+			}
+		}
+		if err != nil {
+			fmt.Printf("Gemini: HTTP request failed: %v\n", err)
+			return "", fmt.Errorf("send request: %w", err)
+		}
 	}
 	defer resp.Body.Close()
 
@@ -192,4 +216,44 @@ func (c *GeminiClient) TestConnection() error {
 		fmt.Printf("Gemini: TestConnection succeeded\n")
 	}
 	return err
+}
+
+func shouldRetryWithDockerGateway(err error, baseURL string) bool {
+	if !isLocalhostBaseURL(baseURL) || !isDockerEnvironment() {
+		return false
+	}
+	return errors.Is(err, syscall.ECONNREFUSED)
+}
+
+func isLocalhostBaseURL(baseURL string) bool {
+	parsed, err := url.Parse(baseURL)
+	if err != nil {
+		return false
+	}
+	host := strings.ToLower(parsed.Hostname())
+	return host == "127.0.0.1" || host == "localhost"
+}
+
+func replaceWithDockerGateway(baseURL string) string {
+	parsed, err := url.Parse(baseURL)
+	if err != nil {
+		return ""
+	}
+	host := parsed.Hostname()
+	port := parsed.Port()
+	if host != "127.0.0.1" && host != "localhost" {
+		return baseURL
+	}
+	parsed.Host = "host.docker.internal"
+	if port != "" {
+		parsed.Host = parsed.Hostname() + ":" + port
+	}
+	return parsed.String()
+}
+
+func isDockerEnvironment() bool {
+	if _, err := os.Stat("/.dockerenv"); err == nil {
+		return true
+	}
+	return os.Getenv("RUNNING_IN_DOCKER") == "true"
 }
