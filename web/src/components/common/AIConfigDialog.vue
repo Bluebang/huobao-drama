@@ -167,7 +167,7 @@
             style="width: 100%"
           >
             <el-option
-              v-for="model in availableModels"
+              v-for="model in modelOptions"
               :key="model"
               :label="model"
               :value="model"
@@ -352,6 +352,14 @@ const availableModels = computed(() => {
   if (!form.provider) return []
   const provider = availableProviders.value.find(p => p.id === form.provider)
   return provider?.models || []
+})
+
+const modelOptions = computed(() => {
+  const options = new Set(availableModels.value)
+  form.model?.forEach(model => {
+    if (model) options.add(model)
+  })
+  return Array.from(options)
 })
 
 const fullEndpointExample = computed(() => {
